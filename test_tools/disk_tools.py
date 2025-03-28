@@ -57,6 +57,57 @@ def get_partition_path(parent_dev, number):
     return f'{parent_dev}{id_separator}{number}'
 
 
+def discover_partition(device) -> list:
+    cmd = (
+        f"lsblk -ln -o NAME,TYPE {device.path} "
+        + r"""| awk '$2 == "part" { print "/dev/" $1 }'"""
+    )
+
+    output = TestRun.executor.run(cmd).stdout
+    partition_list = [line for line in output.split("\n") if line]
+
+    # needs to be placed here (circular dependency)
+    from storage_devices.partition import Partition
+    partitions_on_device_list = []
+
+    # the only tool "that I found out" that returns a value for the partition number field when the
+    # partition is mounted is udevadm.
+    for partition in partition_list:
+        cmd = f"lsblk -n --bytes -o START,SIZE,LOG-SEC {partition}"
+        output = TestRun.executor.run(cmd)
+        if output.exit_code != 0:
+            TestRun.LOGGER.warning(
+                "Warning: Partition detection failed. "
+                "The issue might be caused by an outdated version of `lsblk`. "
+                "Please ensure you are using a version that supports the required "
+                "features (version 2.34 or higher).")
+            return []
+
+        cmd = f"udevadm info {partition} " + "-q property | grep PARTN= | awk -F= '{print $2}'"
+        partition_number = int(TestRun.executor.run(cmd).stdout)
+
+        partition_start, partition_size, partition_leg_sec = output.stdout.split()
+        part_number = int(partition_number)
+        begin = Size(int(partition_start), Unit.Byte)
+        end = Size(
+            (
+                (int(partition_size) / int(partition_leg_sec) + int(partition_start) - 1)
+            ),
+            Unit.Byte,
+        )
+        partitions_on_device_list.append(
+            Partition(
+                parent_dev=device,
+                type=PartitionType.logical,
+                number=part_number,
+                begin=begin,
+                end=end,
+            )
+        )
+
+    return partitions_on_device_list
+
+
 def remove_parition(device, part_number):
     TestRun.LOGGER.info(f"Removing part {part_number} from {device.path}")
     cmd = f'parted --script {device.path} rm {part_number}'
